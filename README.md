@@ -19,7 +19,7 @@
 ## 运行
 
 - 直接运行 exe
-- 或 `python customs_cleaner.py`（需安装 pandas, PyQt5, chardet）
+- 或 `python v1.1.py`（需安装 pandas, PyQt5, chardet）
 
 ## 版本
 
