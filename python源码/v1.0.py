@@ -1,34 +1,22 @@
-import sys, os, chardet
+import sys
+import os
+
 import pandas as pd
 from PyQt5.QtWidgets import *
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent
+from PyQt5.QtCore import Qt
 
-
-class DropArea(QLabel):
-    filesDropped = pyqtSignal(list)
-
-    def __init__(self):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setText("拖拽CSV文件至此（支持多文件）")
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet("border:2px dashed #aaa; padding:20px;")
-        self.setMinimumHeight(100)
-
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.accept()
-            self.setStyleSheet("border:2px solid #2c8cff; padding:20px;")
-
-    def dragLeaveEvent(self, e):
-        self.setStyleSheet("border:2px dashed #aaa; padding:20px;")
-
-    def dropEvent(self, e):
-        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.toLocalFile().endswith('.csv')]
-        if paths:
-            self.filesDropped.emit(paths)
-        self.setStyleSheet("border:2px dashed #aaa; padding:20px;")
+from shared.constants import QTY_FACTORS
+from shared.csv_utils import read_csv_auto_encoding, save_csv_bom
+from shared.cleaning import clean_single_file, rename_cleaned_columns
+from shared.drop_area import DropArea
+from shared.ui_helpers import (
+    build_column_mapping_group,
+    build_unit_conversion_group,
+    build_filter_group,
+    update_rate_from_unit,
+    get_column_mappings,
+    parse_filter_list,
+)
 
 
 class Cleaner(QMainWindow):
@@ -46,7 +34,7 @@ class Cleaner(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        self.drop = DropArea()
+        self.drop = DropArea(support_folders=False)
         self.drop.filesDropped.connect(self.addFiles)
         layout.addWidget(self.drop)
 
@@ -61,49 +49,14 @@ class Cleaner(QMainWindow):
         btn_row.addWidget(self.fileLabel)
         layout.addLayout(btn_row)
 
-        # 列映射（精简为一行一个）
-        map_group = QGroupBox("列名映射（若列名不同请修改）")
-        grid = QGridLayout()
-        row = 0
-        self.cols = {}
-        for label, default in [("日期", "数据年月"), ("商品编码", "商品编码"), ("商品名称", "商品名称"),
-                               ("贸易伙伴", "贸易伙伴名称"), ("数量", "第一数量"), ("金额", "人民币")]:
-            grid.addWidget(QLabel(label), row, 0)
-            self.cols[label] = QLineEdit(default)
-            grid.addWidget(self.cols[label], row, 1)
-            row += 1
-        map_group.setLayout(grid)
+        map_group, self.cols = build_column_mapping_group()
         layout.addWidget(map_group)
 
-        # 单位转换
-        unit_group = QGroupBox("单位转换")
-        unit_layout = QHBoxLayout()
-        unit_layout.addWidget(QLabel("数量单位:"))
-        self.qtyUnit = QComboBox()
-        self.qtyUnit.addItems(["千克", "吨", "克", "磅"])
-        unit_layout.addWidget(self.qtyUnit)
-        unit_layout.addWidget(QLabel("金额单位:"))
-        self.moneyUnit = QComboBox()
-        self.moneyUnit.addItems(["人民币", "美元", "欧元", "英镑"])
-        self.moneyUnit.currentTextChanged.connect(self.setRateHint)
-        unit_layout.addWidget(self.moneyUnit)
-        unit_layout.addWidget(QLabel("汇率:"))
-        self.rateEdit = QLineEdit("0.14")
-        self.rateEdit.setFixedWidth(70)
-        unit_layout.addWidget(self.rateEdit)
-        unit_group.setLayout(unit_layout)
+        unit_group, self.qtyUnit, self.moneyUnit, self.rateEdit = \
+            build_unit_conversion_group(self._onRateChanged)
         layout.addWidget(unit_group)
 
-        # 过滤
-        filter_group = QGroupBox("商品过滤（留空则不过滤）")
-        filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("保留编码包含:"))
-        self.incEdit = QLineEdit()
-        filter_layout.addWidget(self.incEdit)
-        filter_layout.addWidget(QLabel("排除编码包含:"))
-        self.excEdit = QLineEdit()
-        filter_layout.addWidget(self.excEdit)
-        filter_group.setLayout(filter_layout)
+        filter_group, self.incEdit, self.excEdit = build_filter_group()
         layout.addWidget(filter_group)
 
         # 清洗选项
@@ -148,11 +101,10 @@ class Cleaner(QMainWindow):
         layout.addLayout(save_row)
 
         self.statusBar().showMessage("就绪")
-        self.setRateHint()
+        update_rate_from_unit(self.moneyUnit, self.rateEdit)
 
-    def setRateHint(self):
-        unit = self.moneyUnit.currentText()
-        self.rateEdit.setText({"美元": "0.14", "欧元": "0.13", "英镑": "0.11"}.get(unit, "1"))
+    def _onRateChanged(self):
+        update_rate_from_unit(self.moneyUnit, self.rateEdit)
 
     def selectFiles(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "选择CSV", "", "CSV (*.csv)")
@@ -178,20 +130,20 @@ class Cleaner(QMainWindow):
             QMessageBox.warning(self, "提示", "请先添加文件")
             return
 
-        # 获取映射
-        col_date = self.cols["日期"].text().strip()
-        col_code = self.cols["商品编码"].text().strip()
-        col_name = self.cols["商品名称"].text().strip()
-        col_partner = self.cols["贸易伙伴"].text().strip()
-        col_qty = self.cols["数量"].text().strip()
-        col_amt = self.cols["金额"].text().strip()
+        col_map = get_column_mappings(self.cols)
+        col_date = col_map["日期"]
+        col_code = col_map["商品编码"]
+        col_name = col_map["商品名称"]
+        col_partner = col_map["贸易伙伴"]
+        col_qty = col_map["数量"]
+        col_amt = col_map["金额"]
 
-        qty_factor = {"千克": 1, "吨": 0.001, "克": 1000, "磅": 2.20462}[self.qtyUnit.currentText()]
+        qty_factor = QTY_FACTORS[self.qtyUnit.currentText()]
         qty_label = self.qtyUnit.currentText()
         rate = float(self.rateEdit.text())
         money_label = self.moneyUnit.currentText()
-        inc = [c.strip() for c in self.incEdit.text().split('|') if c.strip()]
-        exc = [c.strip() for c in self.excEdit.text().split('|') if c.strip()]
+        inc = parse_filter_list(self.incEdit.text())
+        exc = parse_filter_list(self.excEdit.text())
         dedup = self.dedup.isChecked()
         missing_opt = self.missing.currentText()
 
@@ -209,9 +161,7 @@ class Cleaner(QMainWindow):
             QApplication.processEvents()
             fname = os.path.basename(path)
             try:
-                with open(path, 'rb') as f:
-                    enc = chardet.detect(f.read(50000))['encoding'] or 'gbk'
-                df = pd.read_csv(path, dtype=str, encoding=enc)
+                df, _enc = read_csv_auto_encoding(path)
             except Exception as e:
                 log.append(f"读取失败 {fname}: {e}")
                 continue
@@ -219,42 +169,17 @@ class Cleaner(QMainWindow):
             orig = len(df)
             total_orig += orig
 
-            # 检查必要列
-            if col_qty not in df.columns or col_amt not in df.columns:
+            df = clean_single_file(
+                df, col_qty, col_amt, qty_factor, rate, money_label,
+                missing_opt, col_code, inc, exc, dedup,
+            )
+            if df is None:
                 log.append(f"跳过 {fname}: 缺少数量或金额列")
                 continue
 
-            # 清洗
-            df[col_qty] = df[col_qty].str.replace(',', '').astype(float)
-            df[col_amt] = df[col_amt].str.replace(',', '').str.strip('"').astype(float)
-            df["数量_清洗后"] = df[col_qty] * qty_factor
-            df["金额_清洗后"] = df[col_amt] * rate if money_label != "人民币" else df[col_amt]
-
-            if missing_opt == "填充0":
-                df["数量_清洗后"] = df["数量_清洗后"].fillna(0)
-                df["金额_清洗后"] = df["金额_清洗后"].fillna(0)
-            else:
-                df = df.dropna(subset=["数量_清洗后", "金额_清洗后"])
-
-            # 过滤
-            if inc or exc:
-                if col_code in df.columns:
-                    mask = pd.Series([True] * len(df))
-                    if inc:
-                        mask &= df[col_code].astype(str).str.contains('|'.join(inc), na=False)
-                    if exc:
-                        mask &= ~df[col_code].astype(str).str.contains('|'.join(exc), na=False)
-                    df = df[mask]
-
-            if dedup:
-                df = df.drop_duplicates()
-
-            # 保留列
             keep = [c for c in [col_date, col_code, col_name, col_partner] if c in df.columns]
             keep += ["数量_清洗后", "金额_清洗后"]
-            df_clean = df[keep].copy()
-            df_clean.rename(columns={"数量_清洗后": f"数量({qty_label})", "金额_清洗后": f"金额({money_label})"},
-                            inplace=True)
+            df_clean = rename_cleaned_columns(df[keep].copy(), qty_label, money_label)
 
             self.cleaned[fname] = df_clean
             clean = len(df_clean)
@@ -273,7 +198,6 @@ class Cleaner(QMainWindow):
             if amt_col in self.merged.columns:
                 a = self.merged[amt_col]
                 merge_stats += f"金额总计: {a.sum():,.2f} {money_label}, 均值: {a.mean():,.2f}\n"
-            # 商品分组
             if col_code in self.merged.columns and amt_col in self.merged.columns:
                 merge_stats += "\n商品编码金额前10:\n"
                 group = self.merged.groupby(col_code)[amt_col].sum().sort_values(ascending=False).head(10)
@@ -296,7 +220,7 @@ class Cleaner(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(self, "保存合并数据", "merged.csv", "CSV (*.csv)")
         if path:
-            self.merged.to_csv(path, index=False, encoding='utf-8-sig')
+            save_csv_bom(self.merged, path)
             QMessageBox.information(self, "成功", f"已保存到 {path}")
 
     def saveSeparate(self):
@@ -306,7 +230,7 @@ class Cleaner(QMainWindow):
         if folder:
             for name, df in self.cleaned.items():
                 out = os.path.join(folder, os.path.splitext(name)[0] + "_cleaned.csv")
-                df.to_csv(out, index=False, encoding='utf-8-sig')
+                save_csv_bom(df, out)
             QMessageBox.information(self, "成功", f"已保存 {len(self.cleaned)} 个文件")
 
 
