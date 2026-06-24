@@ -188,7 +188,11 @@ class Cleaner(QMainWindow):
 
         qty_factor = {"千克": 1, "吨": 0.001, "克": 1000, "磅": 2.20462}[self.qtyUnit.currentText()]
         qty_label = self.qtyUnit.currentText()
-        rate = float(self.rateEdit.text())
+        try:
+            rate = float(self.rateEdit.text())
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", f"汇率 '{self.rateEdit.text()}' 不是有效数字")
+            return
         money_label = self.moneyUnit.currentText()
         inc = [c.strip() for c in self.incEdit.text().split('|') if c.strip()]
         exc = [c.strip() for c in self.excEdit.text().split('|') if c.strip()]
@@ -225,8 +229,18 @@ class Cleaner(QMainWindow):
                 continue
 
             # 清洗
-            df[col_qty] = df[col_qty].str.replace(',', '').astype(float)
-            df[col_amt] = df[col_amt].str.replace(',', '').str.strip('"').astype(float)
+            try:
+                df[col_qty] = pd.to_numeric(df[col_qty].str.replace(',', ''), errors='coerce')
+                df[col_amt] = pd.to_numeric(df[col_amt].str.replace(',', '').str.strip('"'), errors='coerce')
+            except Exception as e:
+                log.append(f"跳过 {fname}: 数值转换失败 - {e}")
+                continue
+            
+            non_numeric_qty = df[col_qty].isna().sum()
+            non_numeric_amt = df[col_amt].isna().sum()
+            if non_numeric_qty > 0 or non_numeric_amt > 0:
+                log.append(f"警告 {fname}: {non_numeric_qty} 行数量、{non_numeric_amt} 行金额无法转为数字（已置为NaN）")
+            
             df["数量_清洗后"] = df[col_qty] * qty_factor
             df["金额_清洗后"] = df[col_amt] * rate if money_label != "人民币" else df[col_amt]
 
@@ -296,18 +310,33 @@ class Cleaner(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(self, "保存合并数据", "merged.csv", "CSV (*.csv)")
         if path:
-            self.merged.to_csv(path, index=False, encoding='utf-8-sig')
-            QMessageBox.information(self, "成功", f"已保存到 {path}")
+            try:
+                self.merged.to_csv(path, index=False, encoding='utf-8-sig')
+                QMessageBox.information(self, "成功", f"已保存到 {path}")
+            except PermissionError:
+                QMessageBox.warning(self, "保存失败", f"没有写入权限: {path}")
+            except OSError as e:
+                QMessageBox.warning(self, "保存失败", f"写入文件时出错: {e}")
 
     def saveSeparate(self):
         if not self.cleaned:
             return
         folder = QFileDialog.getExistingDirectory(self, "选择保存文件夹")
         if folder:
+            saved = 0
+            errors = []
             for name, df in self.cleaned.items():
                 out = os.path.join(folder, os.path.splitext(name)[0] + "_cleaned.csv")
-                df.to_csv(out, index=False, encoding='utf-8-sig')
-            QMessageBox.information(self, "成功", f"已保存 {len(self.cleaned)} 个文件")
+                try:
+                    df.to_csv(out, index=False, encoding='utf-8-sig')
+                    saved += 1
+                except (PermissionError, OSError) as e:
+                    errors.append(f"{name}: {e}")
+            if errors:
+                QMessageBox.warning(self, "部分保存失败",
+                                    f"成功保存 {saved} 个文件，{len(errors)} 个失败:\n" + "\n".join(errors))
+            else:
+                QMessageBox.information(self, "成功", f"已保存 {saved} 个文件")
 
 
 if __name__ == "__main__":

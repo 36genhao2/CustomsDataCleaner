@@ -302,7 +302,11 @@ class CustomsCleaner(QMainWindow):
         
         qty_factor = {"千克":1, "吨":0.001, "克":1000, "磅":2.20462}[self.qty_unit.currentText()]
         qty_label = self.qty_unit.currentText()
-        rate = float(self.rate_edit.text())
+        try:
+            rate = float(self.rate_edit.text())
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", f"汇率 '{self.rate_edit.text()}' 不是有效数字")
+            return
         money_label = self.money_unit.currentText()
         qty_dec = self.qty_dec.value()
         amt_dec = self.amt_dec.value()
@@ -339,9 +343,19 @@ class CustomsCleaner(QMainWindow):
                 log.append(f"跳过 {fname}: 缺少数量或金额列")
                 continue
             
-            df[col_qty] = df[col_qty].str.replace(',', '').astype(float)
+            try:
+                df[col_qty] = pd.to_numeric(df[col_qty].str.replace(',', ''), errors='coerce')
+                df[col_amt] = pd.to_numeric(df[col_amt].str.replace(',', '').str.strip('"'), errors='coerce')
+            except Exception as e:
+                log.append(f"跳过 {fname}: 数值转换失败 - {e}")
+                continue
+            
+            non_numeric_qty = df[col_qty].isna().sum()
+            non_numeric_amt = df[col_amt].isna().sum()
+            if non_numeric_qty > 0 or non_numeric_amt > 0:
+                log.append(f"警告 {fname}: {non_numeric_qty} 行数量、{non_numeric_amt} 行金额无法转为数字（已置为NaN）")
+            
             df["数量_清洗后"] = df[col_qty] * qty_factor
-            df[col_amt] = df[col_amt].str.replace(',', '').str.strip('"').astype(float)
             df["金额_清洗后"] = df[col_amt] * rate if money_label != "人民币" else df[col_amt]
             df["数量_清洗后"] = df["数量_清洗后"].round(qty_dec)
             df["金额_清洗后"] = df["金额_清洗后"].round(amt_dec)
@@ -444,7 +458,15 @@ class CustomsCleaner(QMainWindow):
         if not selected:
             QMessageBox.warning(self, "提示", "请选择要删除的列")
             return
-        self.df = self.df.drop(columns=selected)
+        missing = [c for c in selected if c not in self.df.columns]
+        if missing:
+            QMessageBox.warning(self, "错误", f"以下列不存在: {', '.join(missing)}")
+            return
+        try:
+            self.df = self.df.drop(columns=selected)
+        except Exception as e:
+            QMessageBox.warning(self, "删除列错误", str(e))
+            return
         self.del_cols.clear()
         for col in self.df.columns:
             self.del_cols.addItem(col)
@@ -457,8 +479,13 @@ class CustomsCleaner(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(self, "保存当前明细", "cleaned_data.csv", "CSV (*.csv)")
         if path:
-            self.df.to_csv(path, index=False, encoding='utf-8-sig')
-            QMessageBox.information(self, "成功", f"已保存到 {path}")
+            try:
+                self.df.to_csv(path, index=False, encoding='utf-8-sig')
+                QMessageBox.information(self, "成功", f"已保存到 {path}")
+            except PermissionError:
+                QMessageBox.warning(self, "保存失败", f"没有写入权限: {path}")
+            except OSError as e:
+                QMessageBox.warning(self, "保存失败", f"写入文件时出错: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
