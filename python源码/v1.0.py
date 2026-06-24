@@ -1,4 +1,4 @@
-import sys, os, chardet
+import sys, os, re, chardet
 import pandas as pd
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -188,7 +188,11 @@ class Cleaner(QMainWindow):
 
         qty_factor = {"千克": 1, "吨": 0.001, "克": 1000, "磅": 2.20462}[self.qtyUnit.currentText()]
         qty_label = self.qtyUnit.currentText()
-        rate = float(self.rateEdit.text())
+        try:
+            rate = float(self.rateEdit.text())
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "汇率必须为数字")
+            return
         money_label = self.moneyUnit.currentText()
         inc = [c.strip() for c in self.incEdit.text().split('|') if c.strip()]
         exc = [c.strip() for c in self.excEdit.text().split('|') if c.strip()]
@@ -241,9 +245,9 @@ class Cleaner(QMainWindow):
                 if col_code in df.columns:
                     mask = pd.Series([True] * len(df))
                     if inc:
-                        mask &= df[col_code].astype(str).str.contains('|'.join(inc), na=False)
+                        mask &= df[col_code].astype(str).str.contains('|'.join(re.escape(c) for c in inc), na=False)
                     if exc:
-                        mask &= ~df[col_code].astype(str).str.contains('|'.join(exc), na=False)
+                        mask &= ~df[col_code].astype(str).str.contains('|'.join(re.escape(c) for c in exc), na=False)
                     df = df[mask]
 
             if dedup:
